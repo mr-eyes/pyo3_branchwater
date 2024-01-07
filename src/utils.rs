@@ -1,29 +1,29 @@
-/// Utility functions for pyo3_branchwater.
-
+/// Utility functions for sourmash_plugin_branchwater.
 use rayon::prelude::*;
+use sourmash::encodings::HashFunctions;
 
 use std::fs::File;
 use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use zip::read::ZipArchive;
 use tempfile::tempdir;
+use zip::read::ZipArchive;
 
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 
 use std::collections::BinaryHeap;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
-use std::cmp::{PartialOrd, Ordering};
+use std::cmp::{Ordering, PartialOrd};
 
+use sourmash::prelude::FracMinHashOps;
+use sourmash::prelude::MinHashOps;
 use sourmash::signature::{Signature, SigsTrait};
 use sourmash::sketch::minhash::{max_hash_for_scaled, KmerMinHash};
 use sourmash::sketch::Sketch;
-use sourmash::prelude::MinHashOps;
-use sourmash::prelude::FracMinHashOps;
 
 // use tempfile::tempdir;
 /// Track a name/minhash.
@@ -100,7 +100,6 @@ pub fn check_compatible_downsample(
     Ok(())
 }
 
-
 /// Given a vec of search Signatures, each containing one or more sketches,
 /// and a template Sketch, return a compatible (& now downsampled)
 /// Sketch from the search Signatures..
@@ -108,9 +107,11 @@ pub fn check_compatible_downsample(
 /// CTB note: this will return the first acceptable match, I think, ignoring
 /// all others.
 
-
-pub fn prepare_query(search_sigs: &[Signature], template: &Sketch, location: &str) -> Option<SmallSignature> {
-
+pub fn prepare_query(
+    search_sigs: &[Signature],
+    template: &Sketch,
+    location: &str,
+) -> Option<SmallSignature> {
     for search_sig in search_sigs.iter() {
         // find exact match for template?
         if let Some(Sketch::MinHash(mh)) = search_sig.select_sketch(template) {
@@ -118,7 +119,7 @@ pub fn prepare_query(search_sigs: &[Signature], template: &Sketch, location: &st
                 location: location.to_string().clone(),
                 name: search_sig.name(),
                 md5sum: mh.md5sum(),
-                minhash: mh.clone()
+                minhash: mh.clone(),
             });
         } else {
             // no - try to find one that can be downsampled
@@ -159,10 +160,7 @@ pub fn prefetch(
             let overlap = searchsig.count_common(query_mh, false);
             if let Ok(overlap) = overlap {
                 if overlap >= threshold_hashes {
-                    let result = PrefetchResult {
-                        overlap,
-                        ..result
-                    };
+                    let result = PrefetchResult { overlap, ..result };
                     mm = Some(result);
                 }
             }
@@ -175,7 +173,7 @@ pub fn prefetch(
 pub fn write_prefetch<P: AsRef<Path> + std::fmt::Debug + std::fmt::Display + Clone>(
     query: &SmallSignature,
     prefetch_output: Option<P>,
-    matchlist: &BinaryHeap<PrefetchResult>
+    matchlist: &BinaryHeap<PrefetchResult>,
 ) -> Result<()> {
     // Set up a writer for prefetch output
     let prefetch_out: Box<dyn Write> = match prefetch_output {
@@ -183,32 +181,39 @@ pub fn write_prefetch<P: AsRef<Path> + std::fmt::Debug + std::fmt::Display + Clo
         None => Box::new(std::io::stdout()),
     };
     let mut writer = BufWriter::new(prefetch_out);
-    writeln!(&mut writer, "query_filename,query_name,query_md5,match_name,match_md5,intersect_bp").ok();
+    writeln!(
+        &mut writer,
+        "query_filename,query_name,query_md5,match_name,match_md5,intersect_bp"
+    )
+    .ok();
 
     for m in matchlist.iter() {
-        writeln!(&mut writer, "{},\"{}\",{},\"{}\",{},{}", query.location,
-                 query.name, query.md5sum,
-                 m.name, m.md5sum, m.overlap).ok();
+        writeln!(
+            &mut writer,
+            "{},\"{}\",{},\"{}\",{},{}",
+            query.location, query.name, query.md5sum, m.name, m.md5sum, m.overlap
+        )
+        .ok();
     }
 
     Ok(())
 }
 
 /// Load a list of filenames from a file. Exits on bad lines.
-pub fn load_sketchlist_filenames<P: AsRef<Path>>(sketchlist_filename: &P) ->
-    Result<Vec<PathBuf>>
-{
+pub fn load_sketchlist_filenames<P: AsRef<Path>>(sketchlist_filename: &P) -> Result<Vec<PathBuf>> {
     let sketchlist_file = BufReader::new(File::open(sketchlist_filename)?);
 
-    let mut sketchlist_filenames : Vec<PathBuf> = Vec::new();
+    let mut sketchlist_filenames: Vec<PathBuf> = Vec::new();
     for line in sketchlist_file.lines() {
         let line = match line {
             Ok(v) => v,
-            Err(_) => return {
-                let filename = sketchlist_filename.as_ref().display();
-                let msg = format!("invalid line in fromfile '{}'", filename);
-                Err(anyhow!(msg))
-            },
+            Err(_) => {
+                return {
+                    let filename = sketchlist_filename.as_ref().display();
+                    let msg = format!("invalid line in fromfile '{}'", filename);
+                    Err(anyhow!(msg))
+                }
+            }
         };
 
         if !line.is_empty() {
@@ -219,7 +224,6 @@ pub fn load_sketchlist_filenames<P: AsRef<Path>>(sketchlist_filename: &P) ->
     }
     Ok(sketchlist_filenames)
 }
-
 
 /// Loads signature file paths from a ZIP archive.
 ///
@@ -248,41 +252,91 @@ pub fn load_sketchlist_filenames<P: AsRef<Path>>(sketchlist_filename: &P) ->
 /// * Any other IO or file related error.
 pub fn load_sigpaths_from_zip<P: AsRef<Path>>(
     zip_path: P,
+    template: &Sketch,
+    report_type: ReportType,
 ) -> Result<(Vec<PathBuf>, tempfile::TempDir)> {
     let mut signature_paths = Vec::new();
     let temp_dir = tempdir()?;
     let zip_file = File::open(&zip_path)?;
     let mut zip_archive = ZipArchive::new(zip_file)?;
 
+    let mut skipped_paths = 0;
     for i in 0..zip_archive.len() {
         let mut file = zip_archive.by_index(i)?;
-        let mut sig = Vec::new();
-        file.read_to_end(&mut sig)?;
+        // make string copy to avoid file borrowing issues
+        let file_name_str = file.name().to_string();
+        let file_name = Path::new(&file_name_str)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // use contains to account for sig.gz_0 bug in sourmash
+        if file_name.contains(".sig") || file_name.contains(".sig.gz") {
+            // read file
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents)?;
+            // get sig from file
+            let sigs = Signature::from_reader(&contents[..])?;
+            if sigs.len() > 1 {
+                return Err(anyhow::anyhow!(
+                    "File '{}' has more than one signature.",
+                    file_name
+                ));
+            }
+            let sig = &sigs[0]; // Directly take the first (only) signature
+                                // check for compatible sketch
+            let is_compatible = if let Some(Sketch::MinHash(_)) = sig.select_sketch(template) {
+                true
+            } else if let Sketch::MinHash(template_mh) = template {
+                sig.sketches().iter().any(|sketch| {
+                    matches!(sketch, Sketch::MinHash(ref_mh) if check_compatible_downsample(&ref_mh, template_mh).is_ok())
+                })
+            } else {
+                false
+            };
 
-        let file_name = Path::new(file.name()).file_name().unwrap().to_str().unwrap();
-        if file_name.ends_with(".sig") || file_name.ends_with(".sig.gz") {
-            let mut new_file = File::create(temp_dir.path().join(file_name))?;
-            new_file.write_all(&sig)?;
-
-            // add path to signature_paths
-            signature_paths.push(temp_dir.path().join(file_name));
+            if is_compatible {
+                let path = temp_dir.path().join(file_name);
+                // write contents to new file
+                let mut new_file = File::create(&path)?;
+                new_file.write_all(&contents)?;
+                // add filepath to signature paths
+                signature_paths.push(path);
+            } else {
+                skipped_paths += 1;
+            }
         }
     }
-    println!("loaded paths for {} signature files from zipfile {}", signature_paths.len(), zip_path.as_ref().display());
+    if skipped_paths > 0 {
+        eprintln!(
+            "WARNING: skipped {} {} paths - no compatible signatures.",
+            skipped_paths, report_type
+        );
+    }
+    eprintln!(
+        "loaded paths for {} signature files from zipfile {}",
+        signature_paths.len(),
+        zip_path.as_ref().display()
+    );
     Ok((signature_paths, temp_dir))
 }
 
-
-pub fn load_fasta_fromfile<P: AsRef<Path>>(sketchlist_filename: &P) -> Result<Vec<(String, PathBuf, String)>> {
+pub fn load_fasta_fromfile<P: AsRef<Path>>(
+    sketchlist_filename: &P,
+) -> Result<Vec<(String, PathBuf, String)>> {
     let mut rdr = csv::Reader::from_path(sketchlist_filename)?;
 
     // Check for right header
     let headers = rdr.headers()?;
-    if headers.len() != 3 ||
-    headers.get(0).unwrap() != "name" ||
-    headers.get(1).unwrap() != "genome_filename" ||
-    headers.get(2).unwrap() != "protein_filename" {
-        return Err(anyhow!("Invalid header. Expected 'name,genome_filename,protein_filename', but got '{}'", headers.iter().collect::<Vec<_>>().join(",")));
+    if headers.len() != 3
+        || headers.get(0).unwrap() != "name"
+        || headers.get(1).unwrap() != "genome_filename"
+        || headers.get(2).unwrap() != "protein_filename"
+    {
+        return Err(anyhow!(
+            "Invalid header. Expected 'name,genome_filename,protein_filename', but got '{}'",
+            headers.iter().collect::<Vec<_>>().join(",")
+        ));
     }
 
     let mut results = Vec::new();
@@ -305,15 +359,26 @@ pub fn load_fasta_fromfile<P: AsRef<Path>>(sketchlist_filename: &P) -> Result<Ve
         }
         processed_rows.insert(row_string.clone());
         row_count += 1;
-        let name = record.get(0).ok_or_else(|| anyhow!("Missing 'name' field"))?.to_string();
+        let name = record
+            .get(0)
+            .ok_or_else(|| anyhow!("Missing 'name' field"))?
+            .to_string();
 
-        let genome_filename = record.get(1).ok_or_else(|| anyhow!("Missing 'genome_filename' field"))?;
+        let genome_filename = record
+            .get(1)
+            .ok_or_else(|| anyhow!("Missing 'genome_filename' field"))?;
         if !genome_filename.is_empty() {
-            results.push((name.clone(), PathBuf::from(genome_filename), "dna".to_string()));
+            results.push((
+                name.clone(),
+                PathBuf::from(genome_filename),
+                "dna".to_string(),
+            ));
             genome_count += 1;
         }
 
-        let protein_filename = record.get(2).ok_or_else(|| anyhow!("Missing 'protein_filename' field"))?;
+        let protein_filename = record
+            .get(2)
+            .ok_or_else(|| anyhow!("Missing 'protein_filename' field"))?;
         if !protein_filename.is_empty() {
             results.push((name, PathBuf::from(protein_filename), "protein".to_string()));
             protein_count += 1;
@@ -323,19 +388,22 @@ pub fn load_fasta_fromfile<P: AsRef<Path>>(sketchlist_filename: &P) -> Result<Ve
     if duplicate_count > 0 {
         println!("Warning: {} duplicated rows were skipped.", duplicate_count);
     }
-    println!("Loaded {} rows in total ({} genome and {} protein files)", row_count, genome_count, protein_count);
+    println!(
+        "Loaded {} rows in total ({} genome and {} protein files)",
+        row_count, genome_count, protein_count
+    );
     Ok(results)
 }
 
-
 /// Load a collection of sketches from a file in parallel.
-pub fn load_sketches(sketchlist_paths: Vec<PathBuf>, template: &Sketch) ->
-    Result<(Vec<SmallSignature>, usize, usize)>
-{
+pub fn load_sketches(
+    sketchlist_paths: Vec<PathBuf>,
+    template: &Sketch,
+) -> Result<(Vec<SmallSignature>, usize, usize)> {
     let skipped_paths = AtomicUsize::new(0);
     let failed_paths = AtomicUsize::new(0);
 
-    let sketchlist : Vec<SmallSignature> = sketchlist_paths
+    let sketchlist: Vec<SmallSignature> = sketchlist_paths
         .par_iter()
         .filter_map(|m| {
             let filename = m.display().to_string();
@@ -348,7 +416,7 @@ pub fn load_sketches(sketchlist_paths: Vec<PathBuf>, template: &Sketch) ->
                         let _i = skipped_paths.fetch_add(1, atomic::Ordering::SeqCst);
                     }
                     sm
-                },
+                }
                 Err(err) => {
                     // failed to load from this path - print error & track.
                     eprintln!("Sketch loading error: {}", err);
@@ -372,10 +440,8 @@ pub fn load_sketches_above_threshold(
     sketchlist_paths: Vec<PathBuf>,
     template: &Sketch,
     query: &KmerMinHash,
-    threshold_hashes: u64
-) ->
-    Result<(BinaryHeap<PrefetchResult>, usize, usize)>
-{
+    threshold_hashes: u64,
+) -> Result<(BinaryHeap<PrefetchResult>, usize, usize)> {
     let skipped_paths = AtomicUsize::new(0);
     let failed_paths = AtomicUsize::new(0);
 
@@ -389,8 +455,7 @@ pub fn load_sketches_above_threshold(
                 Ok(sigs) => {
                     let mut mm = None;
 
-                    if let Some(sm) = prepare_query(&sigs, template,
-                                                           &location) {
+                    if let Some(sm) = prepare_query(&sigs, template, &location) {
                         let mh = sm.minhash;
                         if let Ok(overlap) = mh.count_common(query, false) {
                             if overlap >= threshold_hashes {
@@ -404,8 +469,7 @@ pub fn load_sketches_above_threshold(
                             }
                         }
                     } else {
-                        eprintln!("WARNING: no compatible sketches in path '{}'",
-                                  m.display());
+                        eprintln!("WARNING: no compatible sketches in path '{}'", m.display());
                         let _i = skipped_paths.fetch_add(1, atomic::Ordering::SeqCst);
                     }
                     mm
@@ -413,8 +477,10 @@ pub fn load_sketches_above_threshold(
                 Err(err) => {
                     eprintln!("Sketch loading error: {}", err);
                     let _ = failed_paths.fetch_add(1, atomic::Ordering::SeqCst);
-                    eprintln!("WARNING: could not load sketches from path '{}'",
-                          m.display());
+                    eprintln!(
+                        "WARNING: could not load sketches from path '{}'",
+                        m.display()
+                    );
                     None
                 }
             }
@@ -426,7 +492,6 @@ pub fn load_sketches_above_threshold(
 
     Ok((matchlist, skipped_paths, failed_paths))
 }
-
 
 /// Loads all compatible sketches from a ZIP archive at the given path into memory.
 /// Currently not parallelized; use a different zip crate to enable parallelization.
@@ -461,13 +526,20 @@ pub fn load_sketches_from_zip<P: AsRef<Path>>(
     // loop through, loading signatures
     for i in 0..zip_archive.len() {
         let mut file = zip_archive.by_index(i)?;
-        let file_name = Path::new(file.name()).file_name().unwrap().to_str().unwrap().to_owned();
+        let file_name = Path::new(file.name())
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
 
-        if !file_name.ends_with(".sig") && !file_name.ends_with(".sig.gz") {
+        if !file_name.contains(".sig") && !file_name.contains(".sig.gz") {
             continue;
         }
         if let Ok(sigs) = Signature::from_reader(&mut file) {
-            if let Some(sm) = prepare_query(&sigs, template, &zip_path.as_ref().display().to_string()) {
+            if let Some(sm) =
+                prepare_query(&sigs, template, &zip_path.as_ref().display().to_string())
+            {
                 sketchlist.push(sm);
             } else {
                 // track number of paths that have no matching sigs
@@ -483,7 +555,6 @@ pub fn load_sketches_from_zip<P: AsRef<Path>>(
     println!("loaded {} signatures", sketchlist.len());
     Ok((sketchlist, skipped_paths, failed_paths))
 }
-
 
 /// Control function to read signature FILE PATHS from an input file.
 /// If a ZIP archive is provided (detected via extension),
@@ -503,11 +574,21 @@ pub fn load_sketches_from_zip<P: AsRef<Path>>(
 ///  `TempDir` temporary directory where they can be used individually.
 pub fn load_sigpaths_from_zip_or_pathlist<P: AsRef<Path>>(
     sketchlist_path: P,
+    template: &Sketch,
+    report_type: ReportType,
 ) -> Result<(Vec<PathBuf>, Option<tempfile::TempDir>)> {
-    eprintln!("Reading list of filepaths from: '{}'", sketchlist_path.as_ref().display());
+    eprintln!(
+        "Reading list of filepaths from: '{}'",
+        sketchlist_path.as_ref().display()
+    );
 
-    let result = if sketchlist_path.as_ref().extension().map(|ext| ext == "zip").unwrap_or(false) {
-        let (paths, tempdir) = load_sigpaths_from_zip(&sketchlist_path)?;
+    let result = if sketchlist_path
+        .as_ref()
+        .extension()
+        .map(|ext| ext == "zip")
+        .unwrap_or(false)
+    {
+        let (paths, tempdir) = load_sigpaths_from_zip(&sketchlist_path, template, report_type)?;
         (paths, Some(tempdir))
     } else {
         let paths = load_sketchlist_filenames(&sketchlist_path)?;
@@ -522,6 +603,7 @@ pub fn load_sigpaths_from_zip_or_pathlist<P: AsRef<Path>>(
 pub enum ReportType {
     Query,
     Against,
+    Index,
 }
 
 impl std::fmt::Display for ReportType {
@@ -529,6 +611,7 @@ impl std::fmt::Display for ReportType {
         let description = match self {
             ReportType::Query => "query",
             ReportType::Against => "search",
+            ReportType::Index => "index",
         };
         write!(f, "{}", description)
     }
@@ -554,15 +637,23 @@ pub fn load_sketches_from_zip_or_pathlist<P: AsRef<Path>>(
     template: &Sketch,
     report_type: ReportType,
 ) -> Result<Vec<SmallSignature>> {
-    eprintln!("Reading list of {} paths from: '{}'", report_type, sketchlist_path.as_ref().display());
+    eprintln!(
+        "Reading list of {} paths from: '{}'",
+        report_type,
+        sketchlist_path.as_ref().display()
+    );
 
-    let (sketchlist, skipped_paths, failed_paths) =
-        if sketchlist_path.as_ref().extension().map(|ext| ext == "zip").unwrap_or(false) {
-            load_sketches_from_zip(sketchlist_path, template)?
-        } else {
-            let sketch_paths = load_sketchlist_filenames(&sketchlist_path)?;
-            load_sketches(sketch_paths, template)?
-        };
+    let (sketchlist, skipped_paths, failed_paths) = if sketchlist_path
+        .as_ref()
+        .extension()
+        .map(|ext| ext == "zip")
+        .unwrap_or(false)
+    {
+        load_sketches_from_zip(sketchlist_path, template)?
+    } else {
+        let sketch_paths = load_sketchlist_filenames(&sketchlist_path)?;
+        load_sketches(sketch_paths, template)?
+    };
 
     report_on_sketch_loading(&sketchlist, skipped_paths, failed_paths, report_type)?;
 
@@ -597,19 +688,16 @@ pub fn report_on_sketch_loading(
     failed_paths: usize,
     report_type: ReportType,
 ) -> Result<()> {
-
     if failed_paths > 0 {
         eprintln!(
             "WARNING: {} {} paths failed to load. See error messages above.",
-            failed_paths,
-            report_type
+            failed_paths, report_type
         );
     }
     if skipped_paths > 0 {
         eprintln!(
             "WARNING: skipped {} {} paths - no compatible signatures.",
-            skipped_paths,
-            report_type
+            skipped_paths, report_type
         );
     }
 
@@ -636,7 +724,11 @@ pub fn consume_query_by_gather<P: AsRef<Path> + std::fmt::Debug + std::fmt::Disp
         None => Box::new(std::io::stdout()),
     };
     let mut writer = BufWriter::new(gather_out);
-    writeln!(&mut writer, "query_filename,rank,query_name,query_md5,match_name,match_md5,intersect_bp").ok();
+    writeln!(
+        &mut writer,
+        "query_filename,rank,query_name,query_md5,match_name,match_md5,intersect_bp"
+    )
+    .ok();
 
     let mut matching_sketches = matchlist;
     let mut rank = 0;
@@ -647,8 +739,13 @@ pub fn consume_query_by_gather<P: AsRef<Path> + std::fmt::Debug + std::fmt::Disp
     let location = query.location;
     let mut query_mh = query.minhash;
 
-    eprintln!("{} iter {}: start: query hashes={} matches={}", location, rank,
-              query_mh.size(), matching_sketches.len());
+    eprintln!(
+        "{} iter {}: start: query hashes={} matches={}",
+        location,
+        rank,
+        query_mh.size(),
+        matching_sketches.len()
+    );
 
     while !matching_sketches.is_empty() {
         let best_element = matching_sketches.peek().unwrap();
@@ -656,10 +753,18 @@ pub fn consume_query_by_gather<P: AsRef<Path> + std::fmt::Debug + std::fmt::Disp
         // remove!
         query_mh.remove_from(&best_element.minhash)?;
 
-        writeln!(&mut writer, "{},{},\"{}\",{},\"{}\",{},{}", location, rank,
-                 query.name, query.md5sum,
-                 best_element.name, best_element.md5sum,
-                 best_element.overlap).ok();
+        writeln!(
+            &mut writer,
+            "{},{},\"{}\",{},\"{}\",{},{}",
+            location,
+            rank,
+            query.name,
+            query.md5sum,
+            best_element.name,
+            best_element.md5sum,
+            best_element.overlap
+        )
+        .ok();
 
         // recalculate remaining overlaps between query and all sketches.
         // note: this is parallelized.
@@ -669,27 +774,41 @@ pub fn consume_query_by_gather<P: AsRef<Path> + std::fmt::Debug + std::fmt::Disp
         let sub_hashes = last_hashes - query_mh.size();
         let sub_matches = last_matches - matching_sketches.len();
 
-        eprintln!("{} iter {}: remaining: query hashes={}(-{}) matches={}(-{})", location, rank,
-            query_mh.size(), sub_hashes, matching_sketches.len(), sub_matches);
+        eprintln!(
+            "{} iter {}: remaining: query hashes={}(-{}) matches={}(-{})",
+            location,
+            rank,
+            query_mh.size(),
+            sub_hashes,
+            matching_sketches.len(),
+            sub_matches
+        );
 
         last_hashes = query_mh.size();
         last_matches = matching_sketches.len();
-
     }
     Ok(())
 }
-  
 
-pub fn build_template(ksize: u8, scaled: usize) -> Sketch {
+pub fn build_template(ksize: u8, scaled: usize, moltype: &str) -> Sketch {
+    let hash_function = match moltype {
+        "dna" => HashFunctions::murmur64_DNA,
+        "protein" => HashFunctions::murmur64_protein,
+        "dayhoff" => HashFunctions::murmur64_dayhoff,
+        "hp" => HashFunctions::murmur64_hp,
+        _ => panic!("Unknown molecule type: {}", moltype),
+    };
+    //adjust ksize if not dna
+    let adjusted_ksize = if moltype == "dna" { ksize } else { ksize * 3 };
     let max_hash = max_hash_for_scaled(scaled as u64);
     let template_mh = KmerMinHash::builder()
         .num(0u32)
-        .ksize(ksize as u32)
+        .ksize(adjusted_ksize as u32)
         .max_hash(max_hash)
+        .hash_function(hash_function)
         .build();
     Sketch::MinHash(template_mh)
 }
-
 
 pub fn is_revindex_database(path: &Path) -> bool {
     // quick file check for Revindex database:
@@ -715,14 +834,23 @@ pub struct SearchResult {
 
 impl ResultType for SearchResult {
     fn header_fields() -> Vec<&'static str> {
-        vec!["query_name", "query_md5", "match_name", "containment", "intersect_hashes", "match_md5", "jaccard", "max_containment"]
+        vec![
+            "query_name",
+            "query_md5",
+            "match_name",
+            "containment",
+            "intersect_hashes",
+            "match_md5",
+            "jaccard",
+            "max_containment",
+        ]
     }
 
     fn format_fields(&self) -> Vec<String> {
         vec![
-            format!("\"{}\"", self.query_name),  // Wrap query_name with quotes
+            format!("\"{}\"", self.query_name), // Wrap query_name with quotes
             self.query_md5.clone(),
-            format!("\"{}\"", self.match_name),  // Wrap match_name with quotes
+            format!("\"{}\"", self.match_name), // Wrap match_name with quotes
             self.containment.to_string(),
             self.intersect_hashes.to_string(),
             match &self.match_md5 {
@@ -736,7 +864,7 @@ impl ResultType for SearchResult {
             match &self.max_containment {
                 Some(max_containment) => max_containment.to_string(),
                 None => "".to_string(),
-            }
+            },
         ]
     }
 }
@@ -764,7 +892,19 @@ pub fn bool_to_python_string(b: bool) -> String {
 
 impl ResultType for ManifestRow {
     fn header_fields() -> Vec<&'static str> {
-        vec!["internal_location", "md5", "md5short", "ksize", "moltype", "num", "scaled", "n_hashes", "with_abundance", "name", "filename"]
+        vec![
+            "internal_location",
+            "md5",
+            "md5short",
+            "ksize",
+            "moltype",
+            "num",
+            "scaled",
+            "n_hashes",
+            "with_abundance",
+            "name",
+            "filename",
+        ]
     }
 
     fn format_fields(&self) -> Vec<String> {
@@ -778,13 +918,22 @@ impl ResultType for ManifestRow {
             self.scaled.to_string(),
             self.n_hashes.to_string(),
             bool_to_python_string(self.with_abundance),
-            format!("\"{}\"", self.name),  // Wrap name with quotes
+            format!("\"{}\"", self.name), // Wrap name with quotes
             self.filename.clone(),
         ]
     }
 }
 
-pub fn make_manifest_row(sig: &Signature, filename: &Path, internal_location: &str, scaled: u64, num: u32, abund: bool, is_dna: bool, is_protein: bool) -> ManifestRow {
+pub fn make_manifest_row(
+    sig: &Signature,
+    filename: &Path,
+    internal_location: &str,
+    scaled: u64,
+    num: u32,
+    abund: bool,
+    is_dna: bool,
+    is_protein: bool,
+) -> ManifestRow {
     if is_dna && is_protein {
         panic!("Both is_dna and is_protein cannot be true at the same time.");
     } else if !is_dna && !is_protein {
@@ -812,9 +961,7 @@ pub fn make_manifest_row(sig: &Signature, filename: &Path, internal_location: &s
     }
 }
 
-pub fn open_stdout_or_file<P: AsRef<Path>>(
-    output: Option<P>
-) -> Box<dyn Write + Send + 'static> {
+pub fn open_stdout_or_file<P: AsRef<Path>>(output: Option<P>) -> Box<dyn Write + Send + 'static> {
     // if output is a file, use open_output_file
     if let Some(path) = output {
         Box::new(open_output_file(&path))
@@ -823,12 +970,10 @@ pub fn open_stdout_or_file<P: AsRef<Path>>(
     }
 }
 
-pub fn open_output_file<P: AsRef<Path>>(
-    output: &P
-) -> BufWriter<File> {
+pub fn open_output_file<P: AsRef<Path>>(output: &P) -> BufWriter<File> {
     let file = File::create(output).unwrap_or_else(|e| {
         eprintln!("Error creating output file: {:?}", e);
-        std::process::exit(1); 
+        std::process::exit(1);
     });
     BufWriter::new(file)
 }
@@ -863,7 +1008,6 @@ pub enum ZipMessage {
     WriteManifest,
 }
 
-
 pub fn sigwriter<P: AsRef<Path> + Send + 'static>(
     recv: std::sync::mpsc::Receiver<ZipMessage>,
     output: String,
@@ -871,18 +1015,21 @@ pub fn sigwriter<P: AsRef<Path> + Send + 'static>(
     std::thread::spawn(move || -> Result<()> {
         let file_writer = open_output_file(&output);
 
-        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
         let mut zip = zip::ZipWriter::new(file_writer);
         let mut manifest_rows: Vec<ManifestRow> = Vec::new();
         // keep track of md5sum occurrences to prevent overwriting duplicates
-        let mut md5sum_occurrences: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut md5sum_occurrences: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         while let Ok(message) = recv.recv() {
             match message {
                 ZipMessage::SignatureData(sigs, params, filename) => {
                     if sigs.len() != params.len() {
                         bail!("Mismatched lengths of signatures and parameters");
-                    } 
+                    }
                     for (sig, param) in sigs.iter().zip(params.iter()) {
                         let md5sum_str = sig.md5sum();
                         let count = md5sum_occurrences.entry(md5sum_str.clone()).or_insert(0);
@@ -893,9 +1040,18 @@ pub fn sigwriter<P: AsRef<Path> + Send + 'static>(
                             format!("signatures/{}.sig.gz", md5sum_str)
                         };
                         write_signature(sig, &mut zip, options, &sig_filename);
-                        manifest_rows.push(make_manifest_row(sig, &filename, &sig_filename, param.scaled, param.num, param.track_abundance, param.is_dna, param.is_protein));
+                        manifest_rows.push(make_manifest_row(
+                            sig,
+                            &filename,
+                            &sig_filename,
+                            param.scaled,
+                            param.num,
+                            param.track_abundance,
+                            param.is_dna,
+                            param.is_protein,
+                        ));
                     }
-                },
+                }
                 ZipMessage::WriteManifest => {
                     println!("Writing manifest");
                     // Start the CSV file inside the zip
@@ -911,7 +1067,7 @@ pub fn sigwriter<P: AsRef<Path> + Send + 'static>(
 
                     // Write each manifest row
                     for row in &manifest_rows {
-                        let formatted_fields = row.format_fields();  // Assuming you have a format_fields method on ManifestRow
+                        let formatted_fields = row.format_fields(); // Assuming you have a format_fields method on ManifestRow
                         if let Err(e) = writeln!(&mut zip, "{}", formatted_fields.join(",")) {
                             eprintln!("Error writing item: {:?}", e);
                         }
@@ -960,7 +1116,6 @@ where
     })
 }
 
-
 pub fn write_signature(
     sig: &Signature,
     zip: &mut zip::ZipWriter<BufWriter<File>>,
@@ -977,7 +1132,8 @@ pub fn write_signature(
                 Box::new(&mut buffer),
                 niffler::compression::Format::Gzip,
                 niffler::compression::Level::Nine,
-            ).unwrap();
+            )
+            .unwrap();
             gz_writer.write_all(&json_bytes).unwrap();
         }
         buffer.into_inner()

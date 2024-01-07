@@ -7,7 +7,7 @@ jobs:
   mamba:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -17,6 +17,12 @@ jobs:
          toolchain: stable
          override: true
          components: rustfmt, clippy
+
+    - name: Run cargo fmt
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: --all -- --check
 
     - name: cache rust
       uses: Swatinem/rust-cache@v2
@@ -31,10 +37,10 @@ jobs:
           ${{ runner.os }}-conda-${{ env.CACHE_NUMBER }}-${{ hashFiles('environment.yml') }}
 
     - name: setup conda
-      uses: conda-incubator/setup-miniconda@3b0f2504dd76ef23b6d31f291f4913fb60ab5ff3
+      uses: conda-incubator/setup-miniconda@11b562958363ec5770fef326fe8ef0366f8cbf8a
       with:
         auto-update-conda: true
-        python-version: 3.9
+        python-version: 3.11
         channels: conda-forge,bioconda
         miniforge-variant: Mambaforge
         miniforge-version: latest

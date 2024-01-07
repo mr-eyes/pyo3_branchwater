@@ -1,24 +1,22 @@
 /// mastiff_manygather: mastiff-indexed version of fastmultigather.
-
 use anyhow::Result;
 use rayon::prelude::*;
 
 use sourmash::signature::Signature;
-use std::path::Path;
 use sourmash::sketch::Sketch;
+use std::path::Path;
 
 use sourmash::index::revindex::RevIndex;
 
 use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
 
-use std::io::{BufWriter, Write};
 use std::fs::File;
+use std::io::{BufWriter, Write};
 
-
-use crate::utils::{prepare_query, is_revindex_database,
-    load_sketchlist_filenames};
-
+use crate::utils::{
+    is_revindex_database, load_sigpaths_from_zip_or_pathlist, prepare_query, ReportType,
+};
 
 pub fn mastiff_manygather<P: AsRef<Path>>(
     queries_file: P,
@@ -28,14 +26,19 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
     output: Option<P>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !is_revindex_database(index.as_ref()) {
-        bail!("'{}' is not a valid RevIndex database", index.as_ref().display());
+        bail!(
+            "'{}' is not a valid RevIndex database",
+            index.as_ref().display()
+        );
     }
     // Open database once
     let db = RevIndex::open(index.as_ref(), true);
     println!("Loaded DB");
 
     // Load query paths
-    let query_paths = load_sketchlist_filenames(&queries_file)?;
+    let queryfile_name = queries_file.as_ref().to_string_lossy().to_string();
+    let (query_paths, _temp_dir) =
+        load_sigpaths_from_zip_or_pathlist(&queries_file, &template, ReportType::Query)?;
 
     // set up a multi-producer, single-consumer channel.
     let (send, recv) = std::sync::mpsc::sync_channel(rayon::current_num_threads());
@@ -47,10 +50,18 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
     };
     let thrd = std::thread::spawn(move || {
         let mut writer = BufWriter::new(out);
-        writeln!(&mut writer, "query_name,query_md5,match_name,match_md5,f_match_query,intersect_bp").unwrap();
+        writeln!(
+            &mut writer,
+            "query_name,query_md5,match_name,match_md5,f_match_query,intersect_bp"
+        )
+        .unwrap();
         for (query, query_md5, m, m_md5, f_match_query, intersect_bp) in recv.into_iter() {
-            writeln!(&mut writer, "\"{}\",{},\"{}\",{},{},{}",
-                        query, query_md5, m, m_md5, f_match_query, intersect_bp).ok();
+            writeln!(
+                &mut writer,
+                "\"{}\",{},\"{}\",{},{},{}",
+                query, query_md5, m, m_md5, f_match_query, intersect_bp
+            )
+            .ok();
         }
     });
 
@@ -83,9 +94,8 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
                         let threshold = threshold_bp / query.minhash.scaled() as usize;
 
                         // mastiff gather code
-                        println!("Building counter");
-                        let (counter, query_colors, hash_to_color) = db.prepare_gather_counters(&query.minhash);
-                        println!("Counter built");
+                        let (counter, query_colors, hash_to_color) =
+                            db.prepare_gather_counters(&query.minhash);
 
                         let matches = db.gather(
                             counter,
@@ -99,19 +109,25 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
                         // extract matches from Result
                         if let Ok(matches) = matches {
                             for match_ in &matches {
-                                results.push((query.name.clone(),
-                                        query.md5sum.clone(),
-                                        match_.name().clone(),
-                                        match_.md5().clone(),
-                                        match_.f_match(), // f_match_query
-                                        match_.intersect_bp())); // intersect_bp
+                                results.push((
+                                    query.name.clone(),
+                                    query.md5sum.clone(),
+                                    match_.name().clone(),
+                                    match_.md5().clone(),
+                                    match_.f_match(), // f_match_query
+                                    match_.intersect_bp(),
+                                )); // intersect_bp
                             }
                         } else {
                             eprintln!("Error gathering matches: {:?}", matches.err());
                         }
                     } else {
-                        eprintln!("WARNING: no compatible sketches in path '{}'",
-                                filename.display());
+                        if !queryfile_name.ends_with(".zip") {
+                            eprintln!(
+                                "WARNING: no compatible sketches in path '{}'",
+                                filename.display()
+                            );
+                        }
                         let _ = skipped_paths.fetch_add(1, atomic::Ordering::SeqCst);
                     }
                     if results.is_empty() {
@@ -119,12 +135,14 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
                     } else {
                         Some(results)
                     }
-                },
+                }
                 Err(err) => {
                     let _ = failed_paths.fetch_add(1, atomic::Ordering::SeqCst);
                     eprintln!("Sketch loading error: {}", err);
-                    eprintln!("WARNING: could not load sketches from path '{}'",
-                            filename.display());
+                    eprintln!(
+                        "WARNING: could not load sketches from path '{}'",
+                        filename.display()
+                    );
                     None
                 }
             }
@@ -149,12 +167,16 @@ pub fn mastiff_manygather<P: AsRef<Path>>(
     let failed_paths = failed_paths.load(atomic::Ordering::SeqCst);
 
     if skipped_paths > 0 {
-        eprintln!("WARNING: skipped {} query paths - no compatible signatures.",
-                  skipped_paths);
+        eprintln!(
+            "WARNING: skipped {} query paths - no compatible signatures.",
+            skipped_paths
+        );
     }
     if failed_paths > 0 {
-        eprintln!("WARNING: {} signature paths failed to load. See error messages above.",
-                  failed_paths);
+        eprintln!(
+            "WARNING: {} signature paths failed to load. See error messages above.",
+            failed_paths
+        );
     }
 
     Ok(())
